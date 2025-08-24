@@ -158,3 +158,97 @@
   </script>
 </body>
 </html>
+// ... tavo esamas kodas viršuje ...
+
+let isOwner = false; // <- pridedam
+
+async function initBackend(){
+  const banner=document.getElementById('setupBanner');
+  const saveBtn=document.getElementById('saveBtn');
+  if(!FIREBASE_ENABLED){ /* ... */ return; }
+  try{
+    const appMod = await import('https://www.gstatic.com/firebasejs/10.12.3/firebase-app.js');
+    const fs = await import('https://www.gstatic.com/firebasejs/10.12.3/firebase-firestore.js');
+    const authMod = await import('https://www.gstatic.com/firebasejs/10.12.3/firebase-auth.js');
+
+    const app = appMod.initializeApp(FIREBASE_CONFIG);
+
+    // Anonymous auth (jei dar neįdėjai – būtina)
+    const auth = authMod.getAuth(app);
+    await authMod.signInAnonymously(auth);
+
+    const db = fs.getFirestore(app);
+    fb = {
+      db,
+      doc: fs.doc,
+      setDoc: fs.setDoc,
+      onSnapshot: fs.onSnapshot,
+      collection: fs.collection,
+      getDoc: fs.getDoc,
+      getDocs: fs.getDocs,
+      deleteDoc: fs.deleteDoc
+    };
+
+    // --- [SVARBU] užfiksuojam kambario savininką ---
+    await ensureRoomOwner();
+
+    backendReady=true;
+    banner.style.display='none';
+    saveBtn.disabled=false; saveBtn.removeAttribute('title');
+
+    // jei savininkas – rodom "Išvalyti suvestinę"
+    const clearBtn = document.getElementById('clearBtn');
+    if (isOwner && clearBtn){
+      clearBtn.style.display='inline-block';
+      clearBtn.addEventListener('click', clearRoomVotes);
+    }
+
+    startVotesListener();
+  }catch(err){
+    console.error('Firebase init error', err);
+    banner.style.display='block';
+    banner.innerHTML = 'Nepavyko prisijungti prie Firestore. Patikrinkite <code>FIREBASE_CONFIG</code>, „Authorized domains“, „Anonymous auth“, ir taisykles.';
+    saveBtn.disabled=true; saveBtn.title='Firestore neprieinamas';
+  }
+}
+
+// Sukuria /rooms/{roomCode} jei nėra ir nustato ownerUid = current auth uid
+async function ensureRoomOwner(){
+  // auth user id paimame iš localStorage sugeneruoto userId (tavo kodas),
+  // bet Firestore taisyklės tikrina auth.uid, ne local userId.
+  // Anonymous auth sukuria auth.currentUser.uid:
+  const appAuthMod = await import('https://www.gstatic.com/firebasejs/10.12.3/firebase-auth.js');
+  const currentAuth = appAuthMod.getAuth();
+  const authUid = currentAuth.currentUser && currentAuth.currentUser.uid;
+
+  const roomRef = fb.doc(fb.db, 'rooms', roomCode);
+  const snap = await fb.getDoc(roomRef);
+
+  if (!snap.exists()){
+    await fb.setDoc(roomRef, { ownerUid: authUid, createdAt: Date.now() });
+    isOwner = true;
+  } else {
+    const data = snap.data();
+    isOwner = (data && data.ownerUid === authUid);
+  }
+}
+
+// Ištrina VISUS /rooms/{roomCode}/guesses/* (tik savininkui)
+async function clearRoomVotes(){
+  if (!isOwner){ toast('Tik kambario savininkas gali valyti suvestinę.'); return; }
+
+  if (!confirm('Ar tikrai ištrinti visus balsus šiame kambaryje?')) return;
+
+  const col = fb.collection(fb.db,'rooms',roomCode,'guesses');
+  const snap = await fb.getDocs(col);
+
+  // po vieną (galima daryti batch/commit, bet paprastai užtenka)
+  const promises = [];
+  snap.forEach(docSnap => {
+    promises.push(fb.deleteDoc(fb.doc(fb.db,'rooms',roomCode,'guesses',docSnap.id)));
+  });
+  await Promise.all(promises);
+
+  toast('Suvestinė išvalyta.');
+}
+
