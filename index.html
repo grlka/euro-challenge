@@ -46,6 +46,7 @@
   <div class="footerbar">
     <button class="btn primary" id="saveBtn" disabled>Išsaugoti spėjimą</button>
     <button class="btn" id="copyLinkBtn">Kopijuoti nuorodą draugams</button>
+    <button class="btn" id="clearBtn" style="display:none">Išvalyti suvestinę</button>
   </div>
   <div class="toast" id="toast"></div>
 
@@ -69,7 +70,7 @@
 
   <script>
   (function(){
-    // ---- YOU MUST FILL THESE FOR SHARED VOTES ----
+    // ---- Firebase konfigūracija (tavo duomenys) ----
     const FIREBASE_CONFIG = {
       apiKey: "AIzaSyAi5kHufU154Bw6y7TFWhbONJeKIEbKuUA",
       authDomain: "echampionship-challenge.firebaseapp.com",
@@ -77,13 +78,13 @@
       appId: "1:635121606694:web:d9f3dbf730272e0f1b06e7"
     };
     const IS_FILE = location.protocol === 'file:';
-    // Bandykime visada, kai ne file:// (kad neliktų išjungta, kai config jau įrašytas)
-    const FIREBASE_ENABLED = !IS_FILE;
+    const FIREBASE_ENABLED = !IS_FILE; // per http(s) – jungiame backendą
 
     // ---- state ----
     const STORAGE_KEY='ec_guess_v1';
     let userName=''; let roomCode=''; let userId='';
-    let backendReady=false; let fb=null; // {db,doc,setDoc,onSnapshot,collection}
+    let backendReady=false; let fb=null; // {db,doc,setDoc,onSnapshot,collection,getDoc,getDocs,deleteDoc}
+    let isOwner=false; // kambario savininkas?
 
     // ---- helpers ----
     function genUid(){ try{const a=new Uint32Array(4);crypto.getRandomValues(a);return 'u-'+[...a].map(x=>x.toString(16)).join('');}catch{return 'u-'+Date.now().toString(36)+Math.random().toString(36).slice(2);} }
@@ -112,31 +113,66 @@
       const saveBtn=document.getElementById('saveBtn');
       if(!FIREBASE_ENABLED){
         banner.style.display='block';
-        banner.innerHTML = '<b>Reikalinga greita sąranka:</b> įrašykite <code>FIREBASE_CONFIG</code> projekte ir paleiskite šį puslapį per http(s) (ne <code>file://</code>). Tada balsai bus saugomi visiems.';
+        banner.innerHTML = '<b>Reikalinga greita sąranka:</b> įrašykite <code>FIREBASE_CONFIG</code> projekte ir paleiskite šį puslapį per http(s).';
         saveBtn.disabled=true; saveBtn.title='Įveskite Firebase konfigūraciją ir paleiskite per http(s)';
-        return; // paliekam tik UI peržiūrai
+        return;
       }
       try{
-        const appMod = await import('https://www.gstatic.com/firebasejs/10.12.3/firebase-app.js');
-        const fs = await import('https://www.gstatic.com/firebasejs/10.12.3/firebase-firestore.js');
-        const app = appMod.initializeApp(FIREBASE_CONFIG);
+        const { initializeApp } = await import('https://www.gstatic.com/firebasejs/10.12.3/firebase-app.js');
+        const fs   = await import('https://www.gstatic.com/firebasejs/10.12.3/firebase-firestore.js');
+        const auth = await import('https://www.gstatic.com/firebasejs/10.12.3/firebase-auth.js');
+
+        const app = initializeApp(FIREBASE_CONFIG);
+
+        // anoniminis prisijungimas (įjunk Firebase Console → Authentication → Sign-in method → Anonymous)
+        const a = auth.getAuth(app);
+        await auth.signInAnonymously(a);
+
         const db = fs.getFirestore(app);
-        fb = {db, doc:fs.doc, setDoc:fs.setDoc, onSnapshot:fs.onSnapshot, collection:fs.collection};
+        fb = { db,
+          doc:fs.doc, setDoc:fs.setDoc, onSnapshot:fs.onSnapshot,
+          collection:fs.collection, getDoc:fs.getDoc, getDocs:fs.getDocs, deleteDoc:fs.deleteDoc };
+
+        await ensureRoomOwner(a);
+
         backendReady=true;
-        document.getElementById('setupBanner').style.display='none';
+        banner.style.display='none';
         saveBtn.disabled=false; saveBtn.removeAttribute('title');
+
+        const clearBtn=document.getElementById('clearBtn');
+        if(isOwner && clearBtn){ clearBtn.style.display='inline-block'; clearBtn.onclick=clearRoomVotes; }
+
         startVotesListener();
       }catch(err){
         console.error('Firebase init error', err);
         banner.style.display='block';
-        banner.innerHTML = 'Nepavyko prisijungti prie Firestore. Patikrinkite <code>FIREBASE_CONFIG</code> ir <i>Authorized domains</i> sąrašą.';
+        banner.innerHTML='Nepavyko prisijungti prie Firestore. Patikrinkite FIREBASE_CONFIG, Authorized domains, Rules ir ar įjungta Anonymous auth.';
         saveBtn.disabled=true; saveBtn.title='Firestore neprieinamas';
       }
     }
 
     function startVotesListener(){ if(!backendReady) return; const col = fb.collection(fb.db,'rooms',roomCode,'guesses'); fb.onSnapshot(col,(snap)=>{ const rows=[]; snap.forEach(d=> rows.push(d.data())); rows.sort((a,b)=>(b.ts||0)-(a.ts||0)); renderVotesTable(rows); }); }
 
-    async function saveGuess(){ if(!backendReady){ toast('Įvesk Firebase konfigūraciją, kad balsai išliktų visiems.'); return; } const data=getState(); const ref = fb.doc(fb.db,'rooms',roomCode,'guesses',userId); await fb.setDoc(ref,{ name:userName||'Guest', data, ts:Date.now(), id:userId }); toast('Išsaugota!'); }
+    async function saveGuess(){ if(!backendReady){ toast('Įjunk Firestore, kad balsai išliktų visiems.'); return; } const data=getState(); const ref = fb.doc(fb.db,'rooms',roomCode,'guesses',userId); await fb.setDoc(ref,{ name:userName||'Guest', data, ts:Date.now(), id:userId }); toast('Išsaugota!'); }
+
+    // užfiksuoti kambario savininką rooms/{roomCode}.ownerUid
+    async function ensureRoomOwner(authInstance){
+      const authUid = authInstance.currentUser && authInstance.currentUser.uid;
+      const roomRef = fb.doc(fb.db,'rooms',roomCode);
+      const snap = await fb.getDoc(roomRef);
+      if(!snap.exists()){ await fb.setDoc(roomRef,{ ownerUid: authUid, createdAt: Date.now() }); isOwner=true; }
+      else { const data=snap.data(); isOwner = !!(data && data.ownerUid===authUid); }
+    }
+
+    // tik savininkas gali išvalyti kambario suvestinę
+    async function clearRoomVotes(){
+      if(!isOwner){ toast('Tik kambario savininkas gali valyti suvestinę.'); return; }
+      if(!confirm('Ar tikrai ištrinti visus balsus šiame kambaryje?')) return;
+      const col = fb.collection(fb.db,'rooms',roomCode,'guesses');
+      const snap = await fb.getDocs(col);
+      const jobs=[]; snap.forEach(d=> jobs.push(fb.deleteDoc(fb.doc(fb.db,'rooms',roomCode,'guesses',d.id))));
+      await Promise.all(jobs); toast('Suvestinė išvalyta.');
+    }
 
     // ---- boot ----
     ensureRoomFromUrl(); ensureUserId();
@@ -148,7 +184,7 @@
     document.getElementById('openVotesLink').addEventListener('click', ()=> document.getElementById('votesModal').classList.add('show'));
     document.getElementById('closeVotesBtn').addEventListener('click', ()=> document.getElementById('votesModal').classList.remove('show'));
 
-    // Vardo modalas (visada paprašom)
+    // Vardo modalas
     const identityModal=document.getElementById('identityModal'); identityModal.classList.add('show');
     document.getElementById('saveNameBtn').addEventListener('click', ()=>{ const nm=document.getElementById('inpName').value.trim(); if(!nm){ toast('Įvesk vardą'); return; } userName=nm; identityModal.classList.remove('show'); });
 
@@ -158,97 +194,3 @@
   </script>
 </body>
 </html>
-// ... tavo esamas kodas viršuje ...
-
-let isOwner = false; // <- pridedam
-
-async function initBackend(){
-  const banner=document.getElementById('setupBanner');
-  const saveBtn=document.getElementById('saveBtn');
-  if(!FIREBASE_ENABLED){ /* ... */ return; }
-  try{
-    const appMod = await import('https://www.gstatic.com/firebasejs/10.12.3/firebase-app.js');
-    const fs = await import('https://www.gstatic.com/firebasejs/10.12.3/firebase-firestore.js');
-    const authMod = await import('https://www.gstatic.com/firebasejs/10.12.3/firebase-auth.js');
-
-    const app = appMod.initializeApp(FIREBASE_CONFIG);
-
-    // Anonymous auth (jei dar neįdėjai – būtina)
-    const auth = authMod.getAuth(app);
-    await authMod.signInAnonymously(auth);
-
-    const db = fs.getFirestore(app);
-    fb = {
-      db,
-      doc: fs.doc,
-      setDoc: fs.setDoc,
-      onSnapshot: fs.onSnapshot,
-      collection: fs.collection,
-      getDoc: fs.getDoc,
-      getDocs: fs.getDocs,
-      deleteDoc: fs.deleteDoc
-    };
-
-    // --- [SVARBU] užfiksuojam kambario savininką ---
-    await ensureRoomOwner();
-
-    backendReady=true;
-    banner.style.display='none';
-    saveBtn.disabled=false; saveBtn.removeAttribute('title');
-
-    // jei savininkas – rodom "Išvalyti suvestinę"
-    const clearBtn = document.getElementById('clearBtn');
-    if (isOwner && clearBtn){
-      clearBtn.style.display='inline-block';
-      clearBtn.addEventListener('click', clearRoomVotes);
-    }
-
-    startVotesListener();
-  }catch(err){
-    console.error('Firebase init error', err);
-    banner.style.display='block';
-    banner.innerHTML = 'Nepavyko prisijungti prie Firestore. Patikrinkite <code>FIREBASE_CONFIG</code>, „Authorized domains“, „Anonymous auth“, ir taisykles.';
-    saveBtn.disabled=true; saveBtn.title='Firestore neprieinamas';
-  }
-}
-
-// Sukuria /rooms/{roomCode} jei nėra ir nustato ownerUid = current auth uid
-async function ensureRoomOwner(){
-  // auth user id paimame iš localStorage sugeneruoto userId (tavo kodas),
-  // bet Firestore taisyklės tikrina auth.uid, ne local userId.
-  // Anonymous auth sukuria auth.currentUser.uid:
-  const appAuthMod = await import('https://www.gstatic.com/firebasejs/10.12.3/firebase-auth.js');
-  const currentAuth = appAuthMod.getAuth();
-  const authUid = currentAuth.currentUser && currentAuth.currentUser.uid;
-
-  const roomRef = fb.doc(fb.db, 'rooms', roomCode);
-  const snap = await fb.getDoc(roomRef);
-
-  if (!snap.exists()){
-    await fb.setDoc(roomRef, { ownerUid: authUid, createdAt: Date.now() });
-    isOwner = true;
-  } else {
-    const data = snap.data();
-    isOwner = (data && data.ownerUid === authUid);
-  }
-}
-
-// Ištrina VISUS /rooms/{roomCode}/guesses/* (tik savininkui)
-async function clearRoomVotes(){
-  if (!isOwner){ toast('Tik kambario savininkas gali valyti suvestinę.'); return; }
-
-  if (!confirm('Ar tikrai ištrinti visus balsus šiame kambaryje?')) return;
-
-  const col = fb.collection(fb.db,'rooms',roomCode,'guesses');
-  const snap = await fb.getDocs(col);
-
-  // po vieną (galima daryti batch/commit, bet paprastai užtenka)
-  const promises = [];
-  snap.forEach(docSnap => {
-    promises.push(fb.deleteDoc(fb.doc(fb.db,'rooms',roomCode,'guesses',docSnap.id)));
-  });
-  await Promise.all(promises);
-
-  toast('Suvestinė išvalyta.');
-}
-
