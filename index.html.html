@@ -1,0 +1,160 @@
+<!DOCTYPE html>
+<html lang="lt">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>European Championship Challenge</title>
+  <style>
+    :root{--bg:#0d0f17;--card:#1a1f2e;--muted:#2a3147;--ink:#e6e9f2;--ink2:#cfd6ea;--accent:#ff7a1a}
+    *{box-sizing:border-box}
+    body{margin:0;font-family:sans-serif;background:var(--bg);color:var(--ink)}
+    .wrap{max-width:1000px;margin:0 auto;padding:32px 20px 140px}
+    header{display:flex;flex-direction:column;align-items:center;gap:6px}
+    .title{font-weight:800;font-size:28px;text-transform:uppercase}
+    .accent{color:var(--accent)}
+    .subtitle-link{cursor:pointer;font-weight:600;text-decoration:underline;color:var(--accent)}
+    .banner{background:#201927;border:1px dashed #5e3a2b;color:#ffd4b0;padding:10px 12px;border-radius:12px;margin:12px auto;max-width:1000px}
+    .card{background:var(--card);border:1px solid var(--muted);border-radius:16px;padding:16px;margin-top:18px}
+    .group-title{font-weight:800;font-size:18px;margin:0 0 12px}
+    ul.rank{list-style:none;padding:0;margin:0;display:flex;flex-direction:column;gap:10px}
+    li.team{display:grid;grid-template-columns:36px 1fr;align-items:center;gap:10px;background:#161c2c;border:1px solid #27304a;border-radius:12px;padding:8px 10px;cursor:grab}
+    .pos{width:26px;height:26px;border-radius:50%;display:grid;place-items:center;font-weight:800;font-size:13px;background:#24314e}
+    .name{font-weight:700}
+    .footerbar{position:fixed;bottom:0;left:0;right:0;background:#101522;border-top:1px solid var(--muted);padding:14px 20px;display:flex;justify-content:center;gap:10px;z-index:100}
+    .btn{background:#242a3b;border:1px solid var(--muted);color:var(--ink2);padding:10px 14px;border-radius:12px;cursor:pointer;font-weight:600}
+    .btn[disabled]{opacity:.5;cursor:not-allowed}
+    .btn.primary{background:linear-gradient(180deg,#ff8d3a,#ff6f0a);color:#1b1208}
+    .toast{position:fixed;left:50%;bottom:90px;transform:translateX(-50%);background:#0f1422;border:1px solid var(--muted);padding:10px 14px;border-radius:12px;box-shadow:0 10px 30px rgba(0,0,0,.4);opacity:0;transition:.25s;z-index:120}
+    .toast.show{opacity:1}
+    .modal-backdrop{position:fixed;inset:0;background:rgba(0,0,0,.6);display:none;align-items:center;justify-content:center;z-index:110}
+    .modal{background:var(--card);border:1px solid var(--muted);border-radius:16px;max-width:820px;width:100%;padding:18px;max-height:90vh;overflow:auto}
+    .modal-backdrop.show{display:flex}
+    table{border-collapse:separate;border-spacing:0 8px}
+    th,td{vertical-align:top;text-align:left}
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <header>
+      <div class="title">European Championship <span class="accent">Challenge</span></div>
+      <div id="openVotesLink" class="subtitle-link">Balsų suvestinė</div>
+    </header>
+    <div id="setupBanner" class="banner" style="display:none"></div>
+    <div class="grid" id="groupsGrid"></div>
+  </div>
+
+  <div class="footerbar">
+    <button class="btn primary" id="saveBtn" disabled>Išsaugoti spėjimą</button>
+    <button class="btn" id="copyLinkBtn">Kopijuoti nuorodą draugams</button>
+  </div>
+  <div class="toast" id="toast"></div>
+
+  <!-- Vardo modalas -->
+  <div class="modal-backdrop" id="identityModal">
+    <div class="modal">
+      <h3>Įvesk savo vardą</h3>
+      <input id="inpName" placeholder="Tavo vardas" style="width:100%;padding:10px;border-radius:10px;border:1px solid #2a3147;background:#0f1422;color:#e6e9f2">
+      <div style="margin-top:12px"><button class="btn primary" id="saveNameBtn">Tęsti</button></div>
+    </div>
+  </div>
+
+  <!-- Suvestinės modalas -->
+  <div class="modal-backdrop" id="votesModal">
+    <div class="modal">
+      <h3>Draugų pasirinkimai</h3>
+      <div id="votesContainer" class="subtitle">Dar niekas nebalsavo.</div>
+      <div style="margin-top:12px"><button class="btn" id="closeVotesBtn">Uždaryti</button></div>
+    </div>
+  </div>
+
+  <script>
+  (function(){
+    // ---- YOU MUST FILL THESE FOR SHARED VOTES ----
+    const FIREBASE_CONFIG = {
+      apiKey: "AIzaSyAi5kHufU154Bw6y7TFWhbONJeKIEbKuUA",
+      authDomain: "echampionship-challenge.firebaseapp.com",
+      projectId: "echampionship-challenge",
+      appId: "1:635121606694:web:d9f3dbf730272e0f1b06e7"
+    };
+    const IS_FILE = location.protocol === 'file:';
+    // Bandykime visada, kai ne file:// (kad neliktų išjungta, kai config jau įrašytas)
+    const FIREBASE_ENABLED = !IS_FILE;
+
+    // ---- state ----
+    const STORAGE_KEY='ec_guess_v1';
+    let userName=''; let roomCode=''; let userId='';
+    let backendReady=false; let fb=null; // {db,doc,setDoc,onSnapshot,collection}
+
+    // ---- helpers ----
+    function genUid(){ try{const a=new Uint32Array(4);crypto.getRandomValues(a);return 'u-'+[...a].map(x=>x.toString(16)).join('');}catch{return 'u-'+Date.now().toString(36)+Math.random().toString(36).slice(2);} }
+    function ensureUserId(){ userId=localStorage.getItem('ec_uid'); if(!userId){ userId=genUid(); localStorage.setItem('ec_uid',userId);} }
+    function ensureRoomFromUrl(){ const url=new URL(location.href); let rc=url.searchParams.get('room'); if(!rc){ rc='r-'+Date.now().toString(36); url.searchParams.set('room',rc); history.replaceState(null,'',url.toString()); } roomCode=rc; }
+    function toast(msg){ const t=document.getElementById('toast'); t.textContent=msg; t.classList.add('show'); setTimeout(()=>t.classList.remove('show'),1700); }
+    function el(tag,attrs={},children=[]){ const e=document.createElement(tag); for(const[k,v] of Object.entries(attrs)){ if(k==='class') e.className=v; else if(k==='html') e.innerHTML=v; else e.setAttribute(k,v);} children.forEach(c=>e.append(c)); return e; }
+
+    // ---- UI ----
+    const DEFAULT_GROUPS={ A:['Czech Republic','Estonia','Latvia','Portugal','Serbia','Turkey'], B:['Finland','Germany','Great Britain','Lithuania','Montenegro','Sweden'], C:['Bosnia and Herzegovina','Cyprus','Georgia','Greece','Italy','Spain'], D:['Belgium','France','Iceland','Israel','Poland','Slovenia'] };
+    function buildGroupCard(key,teams){ const card=el('section',{class:'card'}); card.append(el('h3',{class:'group-title'},[document.createTextNode('GROUP '+key)])); const list=el('ul',{class:'rank','data-group':key}); teams.forEach(n=>list.append(buildTeamItem(n))); card.append(list); enableSortable(list); return card; }
+    function buildTeamItem(name){ const li=el('li',{class:'team',draggable:'true'}); li.append(el('div',{class:'pos'}), el('div',{class:'name',html:name})); return li; }
+    function enableSortable(list){ list.addEventListener('dragstart',e=>{ const li=e.target.closest('li.team'); if(!li) return; li.classList.add('dragging'); e.dataTransfer.effectAllowed='move'; }); list.addEventListener('dragend',e=>{ const li=e.target.closest('li.team'); if(!li) return; li.classList.remove('dragging'); updatePositions(); }); list.addEventListener('dragover',e=>{ e.preventDefault(); const after=getDragAfterElement(list,e.clientY); const dragging=list.querySelector('.dragging'); if(!dragging) return; if(after==null) list.appendChild(dragging); else list.insertBefore(dragging,after); }); }
+    function getDragAfterElement(container,y){ const els=[...container.querySelectorAll('li.team:not(.dragging)')]; return els.reduce((closest,child)=>{ const b=child.getBoundingClientRect(); const offset=y-b.top-b.height/2; if(offset<0&&offset>closest.offset) return {offset,element:child}; else return closest; },{offset:-Infinity}).element; }
+    function updatePositions(){ document.querySelectorAll('ul.rank').forEach(list=>{ [...list.children].forEach((li,i)=> li.querySelector('.pos').textContent=i+1); }); }
+    function getState(){ const data={}; document.querySelectorAll('ul.rank').forEach(list=>{ const key=list.dataset.group; data[key]=[...list.children].map(li=> li.querySelector('.name').textContent.trim()); }); return data; }
+    function renderFromData(obj){ const grid=document.getElementById('groupsGrid'); grid.innerHTML=''; for(const k of Object.keys(obj)){ grid.append(buildGroupCard(k,obj[k])); } updatePositions(); }
+
+    // ---- votes table ----
+    function renderVotesTable(rows){ const c=document.getElementById('votesContainer'); if(!c) return; if(!rows||rows.length===0){ c.innerHTML='<span class="subtitle">Dar nėra spėjimų.</span>'; return; } const groups=['A','B','C','D']; let html='<table style="width:100%">'; html+='<thead><tr><th>Vardas</th>'+groups.map(g=>`<th>Group ${g}</th>`).join('')+'</tr></thead><tbody>'; for(const r of rows){ html+='<tr><td><b>'+escapeHtml(r.name||'')+'</b></td>'+groups.map(g=>'<td>'+(r.data&&r.data[g]?r.data[g].map((t,i)=>`${i+1}. ${escapeHtml(t)}`).join('<br/>'):'-')+'</td>').join('')+'</tr>'; } html+='</tbody></table>'; c.innerHTML=html; }
+    function escapeHtml(s){ return String(s).replace(/[&<>"']/g, m=>({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"}[m])); }
+
+    // ---- backend (Firebase) ----
+    async function initBackend(){
+      const banner=document.getElementById('setupBanner');
+      const saveBtn=document.getElementById('saveBtn');
+      if(!FIREBASE_ENABLED){
+        banner.style.display='block';
+        banner.innerHTML = '<b>Reikalinga greita sąranka:</b> įrašykite <code>FIREBASE_CONFIG</code> projekte ir paleiskite šį puslapį per http(s) (ne <code>file://</code>). Tada balsai bus saugomi visiems.';
+        saveBtn.disabled=true; saveBtn.title='Įveskite Firebase konfigūraciją ir paleiskite per http(s)';
+        return; // paliekam tik UI peržiūrai
+      }
+      try{
+        const appMod = await import('https://www.gstatic.com/firebasejs/10.12.3/firebase-app.js');
+        const fs = await import('https://www.gstatic.com/firebasejs/10.12.3/firebase-firestore.js');
+        const app = appMod.initializeApp(FIREBASE_CONFIG);
+        const db = fs.getFirestore(app);
+        fb = {db, doc:fs.doc, setDoc:fs.setDoc, onSnapshot:fs.onSnapshot, collection:fs.collection};
+        backendReady=true;
+        document.getElementById('setupBanner').style.display='none';
+        saveBtn.disabled=false; saveBtn.removeAttribute('title');
+        startVotesListener();
+      }catch(err){
+        console.error('Firebase init error', err);
+        banner.style.display='block';
+        banner.innerHTML = 'Nepavyko prisijungti prie Firestore. Patikrinkite <code>FIREBASE_CONFIG</code> ir <i>Authorized domains</i> sąrašą.';
+        saveBtn.disabled=true; saveBtn.title='Firestore neprieinamas';
+      }
+    }
+
+    function startVotesListener(){ if(!backendReady) return; const col = fb.collection(fb.db,'rooms',roomCode,'guesses'); fb.onSnapshot(col,(snap)=>{ const rows=[]; snap.forEach(d=> rows.push(d.data())); rows.sort((a,b)=>(b.ts||0)-(a.ts||0)); renderVotesTable(rows); }); }
+
+    async function saveGuess(){ if(!backendReady){ toast('Įvesk Firebase konfigūraciją, kad balsai išliktų visiems.'); return; } const data=getState(); const ref = fb.doc(fb.db,'rooms',roomCode,'guesses',userId); await fb.setDoc(ref,{ name:userName||'Guest', data, ts:Date.now(), id:userId }); toast('Išsaugota!'); }
+
+    // ---- boot ----
+    ensureRoomFromUrl(); ensureUserId();
+    const saved = localStorage.getItem(STORAGE_KEY); renderFromData(saved?JSON.parse(saved):DEFAULT_GROUPS);
+
+    // UI eventai
+    document.getElementById('saveBtn').addEventListener('click', saveGuess);
+    document.getElementById('copyLinkBtn').addEventListener('click', ()=>{ const url=new URL(location.href); navigator.clipboard.writeText(url.toString()).then(()=>toast('Nuoroda nukopijuota!')).catch(()=>toast('Nepavyko nukopijuoti.')); });
+    document.getElementById('openVotesLink').addEventListener('click', ()=> document.getElementById('votesModal').classList.add('show'));
+    document.getElementById('closeVotesBtn').addEventListener('click', ()=> document.getElementById('votesModal').classList.remove('show'));
+
+    // Vardo modalas (visada paprašom)
+    const identityModal=document.getElementById('identityModal'); identityModal.classList.add('show');
+    document.getElementById('saveNameBtn').addEventListener('click', ()=>{ const nm=document.getElementById('inpName').value.trim(); if(!nm){ toast('Įvesk vardą'); return; } userName=nm; identityModal.classList.remove('show'); });
+
+    // Start backend
+    initBackend();
+  })();
+  </script>
+</body>
+</html>
